@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	unsupportedStructTagMsg = "Unsupported jsonapi tag annotation, %s"
+	unsuportedStructTagMsg = "Unsupported jsonapi tag annotation, %s"
 )
 
 var (
@@ -147,7 +147,7 @@ func unmarshalNode(data *Node, model reflect.Value, included *map[string]*Node) 
 	}()
 
 	modelValue := model.Elem()
-	modelType := modelValue.Type()
+	modelType := model.Type().Elem()
 
 	var er error
 
@@ -217,8 +217,39 @@ func unmarshalNode(data *Node, model reflect.Value, included *map[string]*Node) 
 
 			// Convert the numeric float to one of the supported ID numeric types
 			// (int[8,16,32,64] or uint[8,16,32,64])
-			idValue, err := handleNumeric(floatValue, fieldType.Type, fieldValue)
-			if err != nil {
+			var idValue reflect.Value
+			switch kind {
+			case reflect.Int:
+				n := int(floatValue)
+				idValue = reflect.ValueOf(&n)
+			case reflect.Int8:
+				n := int8(floatValue)
+				idValue = reflect.ValueOf(&n)
+			case reflect.Int16:
+				n := int16(floatValue)
+				idValue = reflect.ValueOf(&n)
+			case reflect.Int32:
+				n := int32(floatValue)
+				idValue = reflect.ValueOf(&n)
+			case reflect.Int64:
+				n := int64(floatValue)
+				idValue = reflect.ValueOf(&n)
+			case reflect.Uint:
+				n := uint(floatValue)
+				idValue = reflect.ValueOf(&n)
+			case reflect.Uint8:
+				n := uint8(floatValue)
+				idValue = reflect.ValueOf(&n)
+			case reflect.Uint16:
+				n := uint16(floatValue)
+				idValue = reflect.ValueOf(&n)
+			case reflect.Uint32:
+				n := uint32(floatValue)
+				idValue = reflect.ValueOf(&n)
+			case reflect.Uint64:
+				n := uint64(floatValue)
+				idValue = reflect.ValueOf(&n)
+			default:
 				// We had a JSON float (numeric), but our field was not one of the
 				// allowed numeric types
 				er = ErrBadJSONAPIID
@@ -327,7 +358,7 @@ func unmarshalNode(data *Node, model reflect.Value, included *map[string]*Node) 
 			}
 
 		} else {
-			er = fmt.Errorf(unsupportedStructTagMsg, annotation)
+			er = fmt.Errorf(unsuportedStructTagMsg, annotation)
 		}
 	}
 
@@ -364,33 +395,33 @@ func unmarshalAttribute(
 
 	// Handle field of type []string
 	if fieldValue.Type() == reflect.TypeOf([]string{}) {
-		value, err = handleStringSlice(attribute)
+		value, err = handleStringSlice(attribute, args, fieldType, fieldValue)
 		return
 	}
 
 	// Handle field of type time.Time
 	if fieldValue.Type() == reflect.TypeOf(time.Time{}) ||
 		fieldValue.Type() == reflect.TypeOf(new(time.Time)) {
-		value, err = handleTime(attribute, args, fieldValue)
+		value, err = handleTime(attribute, args, fieldType, fieldValue)
 		return
 	}
 
 	// Handle field of type struct
 	if fieldValue.Type().Kind() == reflect.Struct {
-		value, err = handleStruct(attribute, fieldValue)
+		value, err = handleStruct(attribute, args, fieldType, fieldValue)
 		return
 	}
 
 	// Handle field containing slice of structs
 	if fieldValue.Type().Kind() == reflect.Slice &&
 		reflect.TypeOf(fieldValue.Interface()).Elem().Kind() == reflect.Struct {
-		value, err = handleStructSlice(attribute, fieldValue)
+		value, err = handleStructSlice(attribute, args, fieldType, fieldValue)
 		return
 	}
 
 	// JSON value was a float (numeric)
 	if value.Kind() == reflect.Float64 {
-		value, err = handleNumeric(attribute, fieldType, fieldValue)
+		value, err = handleNumeric(attribute, args, fieldType, fieldValue)
 		return
 	}
 
@@ -409,7 +440,11 @@ func unmarshalAttribute(
 	return
 }
 
-func handleStringSlice(attribute interface{}) (reflect.Value, error) {
+func handleStringSlice(
+	attribute interface{},
+	args []string,
+	fieldType reflect.Type,
+	fieldValue reflect.Value) (reflect.Value, error) {
 	v := reflect.ValueOf(attribute)
 	values := make([]string, v.Len())
 	for i := 0; i < v.Len(); i++ {
@@ -419,7 +454,11 @@ func handleStringSlice(attribute interface{}) (reflect.Value, error) {
 	return reflect.ValueOf(values), nil
 }
 
-func handleTime(attribute interface{}, args []string, fieldValue reflect.Value) (reflect.Value, error) {
+func handleTime(
+	attribute interface{},
+	args []string,
+	fieldType reflect.Type,
+	fieldValue reflect.Value) (reflect.Value, error) {
 	var isIso8601 bool
 	v := reflect.ValueOf(attribute)
 
@@ -468,6 +507,7 @@ func handleTime(attribute interface{}, args []string, fieldValue reflect.Value) 
 
 func handleNumeric(
 	attribute interface{},
+	args []string,
 	fieldType reflect.Type,
 	fieldValue reflect.Value) (reflect.Value, error) {
 	v := reflect.ValueOf(attribute)
@@ -544,12 +584,12 @@ func handlePointer(
 		concreteVal = reflect.ValueOf(&cVal)
 	case map[string]interface{}:
 		var err error
-		concreteVal, err = handleStruct(attribute, fieldValue)
+		concreteVal, err = handleStruct(attribute, args, fieldType, fieldValue)
 		if err != nil {
 			return reflect.Value{}, newErrUnsupportedPtrType(
 				reflect.ValueOf(attribute), fieldType, structField)
 		}
-		return concreteVal, err
+		return concreteVal.Elem(), err
 	default:
 		return reflect.Value{}, newErrUnsupportedPtrType(
 			reflect.ValueOf(attribute), fieldType, structField)
@@ -565,42 +605,37 @@ func handlePointer(
 
 func handleStruct(
 	attribute interface{},
+	args []string,
+	fieldType reflect.Type,
 	fieldValue reflect.Value) (reflect.Value, error) {
+	model := reflect.New(fieldValue.Type())
 
 	data, err := json.Marshal(attribute)
 	if err != nil {
-		return reflect.Value{}, err
+		return model, err
 	}
 
-	node := new(Node)
-	if err := json.Unmarshal(data, &node.Attributes); err != nil {
-		return reflect.Value{}, err
+	err = json.Unmarshal(data, model.Interface())
+
+	if err != nil {
+		return model, err
 	}
 
-	var model reflect.Value
-	if fieldValue.Kind() == reflect.Ptr {
-		model = reflect.New(fieldValue.Type().Elem())
-	} else {
-		model = reflect.New(fieldValue.Type())
-	}
-
-	if err := unmarshalNode(node, model, nil); err != nil {
-		return reflect.Value{}, err
-	}
-
-
-	return model, nil
+	return model, err
 }
 
 func handleStructSlice(
 	attribute interface{},
+	args []string,
+	fieldType reflect.Type,
 	fieldValue reflect.Value) (reflect.Value, error) {
 	models := reflect.New(fieldValue.Type()).Elem()
 	dataMap := reflect.ValueOf(attribute).Interface().([]interface{})
 	for _, data := range dataMap {
 		model := reflect.New(fieldValue.Type().Elem()).Elem()
+		modelType := model.Type()
 
-		value, err := handleStruct(data, model)
+		value, err := handleStruct(data, []string{}, modelType, model)
 
 		if err != nil {
 			continue
